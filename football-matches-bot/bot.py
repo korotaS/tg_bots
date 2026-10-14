@@ -3,6 +3,7 @@ import os
 import re
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from time import sleep
 
 import requests
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ PRIORITY_COUNTRIES = frozenset({"UA", "RS"})
 PRIORITY_NAMES = ("ukraine", "serbia")
 KICKOFF_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 TG_LIMIT = 4096
+RETRY_ATTEMPTS = 3
 # ==========================================
 
 
@@ -76,77 +78,87 @@ def _flatten_search_text(payload):
     return "\n\n".join(lines).strip()
 
 
-def call_deepseek_search(day: str, kind: str):
-    if kind == "results":
-        prompt = (
-            f"Search the web for men's football FULL-TIME SCORES from matches that "
-            f"kicked off on {day} (Europe/Berlin calendar date). "
-            "Include only: UEFA Champions League (UCL), UEFA Europa League (UEL), "
-            "UEFA Europa Conference League (UECL) including league phase, knockouts "
-            "and qualifying; UEFA Nations League (UNL); UEFA European Championship "
-            "qualifiers (EUROQ); UEFA World Cup qualifiers only, not other confederations (WCQ). "
-            "For each match report: competition, stage, whether it is first or second "
-            "leg of a two-legged tie (or not two-legged), kickoff CET, home team, away team, "
-            "home and away countries, previous/first-leg score if this is a second leg, "
-            "and the full-time score (home-away). "
-            "Prefer official UEFA, FIFA, and major sports-wire sources. "
-            "If there are no such matches, say so explicitly."
-        )
-    else:
-        prompt = (
-            f"Search the web for men's football fixtures kicking off on {day} "
-            f"(Europe/Berlin calendar date, times in CET/CEST). "
-            "Include only: UEFA Champions League (UCL), UEFA Europa League (UEL), "
-            "UEFA Europa Conference League (UECL) including league phase, knockouts "
-            "and qualifying; UEFA Nations League (UNL); UEFA European Championship "
-            "qualifiers (EUROQ); UEFA World Cup qualifiers only, not other confederations (WCQ). "
-            "For each match report: competition, stage, whether it is first or second "
-            "leg of a two-legged tie (or not two-legged), kickoff CET, home team, away team, "
-            "home and away countries, and previous/first-leg score if this is a second leg. "
-            "Prefer official UEFA, FIFA, and major sports-wire sources. "
-            "If there are no such matches, say so explicitly."
-        )
-    r = requests.post(
-        "https://api.deepseek.com/anthropic/v1/messages",
-        headers={
-            "x-api-key": DEEPSEEK_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "deepseek-flash",
-            "max_tokens": 4096,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                }
-            ],
-            "tools": [
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": 8,
-                }
-            ],
-        },
-        timeout=120,
+def _search_prompt(day: str, kind: str):
+    comps = (
+        "Only these competitions: UEFA Champions League (UCL), UEFA Europa League (UEL), "
+        "UEFA Europa Conference League (UECL) including league phase, knockouts and qualifying; "
+        "UEFA Nations League (UNL); UEFA European Championship qualifiers (EUROQ); "
+        "UEFA World Cup qualifiers, UEFA zone only (WCQ). Men's matches only."
     )
-    r.raise_for_status()
-    payload = r.json()
-    if payload.get("type") == "error" or payload.get("error"):
-        raise RuntimeError("DeepSeek search error")
-    if not _has_search_sources(payload):
-        raise RuntimeError("search returned nothing")
-    text = _flatten_search_text(payload)
-    if not text:
-        raise RuntimeError("search returned nothing")
-    return text
+    fields = (
+        "For each match list: competition, stage, first/second leg or not two-legged, "
+        "kickoff HH:MM CET/CEST, home, away, home country, away country, "
+        "first-leg score if second leg."
+    )
+    if kind == "results":
+        return (
+            f"Search the web for finished men's football results from {day} "
+            f"(calendar date in Europe/Berlin, already over). "
+            f"{comps} {fields} Also list the full-time score as home-away, e.g. 2-1. "
+            "Query sites like UEFA.com, Flashscore, ESPN, BBC for that exact date. "
+            "If no matches finished that day, say NO_MATCHES."
+        )
+    return (
+        f"Search the web for men's football fixtures kicking off on {day} "
+        f"(Europe/Berlin calendar date, kickoff times CET/CEST). "
+        f"{comps} {fields} "
+        "Prefer UEFA, FIFA, and major sports-wire sources. "
+        "If there are no such fixtures, say NO_MATCHES."
+    )
+
+
+def call_deepseek_search(day: str, kind: str):
+    last = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            r = requests.post(
+                "https://api.deepseek.com/anthropic/v1/messages",
+                headers={
+                    "x-api-key": DEEPSEEK_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-flash",
+                    "max_tokens": 8192,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": _search_prompt(day, kind)}],
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "type": "web_search_20250305",
+                            "name": "web_search",
+                            "max_uses": 8,
+                        }
+                    ],
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            if payload.get("type") == "error" or payload.get("error"):
+                raise RuntimeError("DeepSeek search error")
+            if not _has_search_sources(payload):
+                raise RuntimeError("search returned nothing")
+            text = _flatten_search_text(payload)
+            if not text:
+                raise RuntimeError("search returned nothing")
+            return text
+        except Exception as e:
+            last = e
+            print(f"search {kind} {day} attempt {attempt}/{RETRY_ATTEMPTS}: {e}")
+            if attempt < RETRY_ATTEMPTS:
+                sleep(2 * attempt)
+    raise last
 
 
 def call_deepseek_json(day: str, search_text: str, kind: str):
-    system_prompt = """Extract football matches into json.
-Use only facts from the provided search notes. Do not invent matches.
+    system_prompt = """You output json only. Always a json object with a matches array.
+Never return empty content. If nothing qualifies, output {"matches": []}.
+Use only facts from the search notes. Do not invent matches.
 Ignore women's matches and any competition not in the list.
 If a field is unknown, use an empty string.
 
@@ -173,39 +185,55 @@ competition must be one of: UCL, UEL, UECL, UNL, EUROQ, WCQ.
 leg is "1", "2", or "".
 kickoff_cet is HH:MM 24-hour CET/CEST.
 previous_score is empty unless this is a second leg; then include first-leg home and away names and the score.
-score is the full-time result as home-away (e.g. "2-1"). Empty for fixtures that have not been played.
+score is the full-time result as home-away (e.g. "2-1"). Empty if not yet played.
 date is YYYY-MM-DD of kickoff in Europe/Berlin.
 """
     if kind == "results":
-        extra = "This is a RESULTS extract. Fill score with the full-time score."
+        extra = (
+            "RESULTS for that date only. Put the full-time score in score. "
+            "If notes say no matches, json is {\"matches\": []}."
+        )
     else:
-        extra = "This is a FIXTURES extract. Leave score empty."
+        extra = "FIXTURES for that date only. Leave score empty."
     user_prompt = (
-        f"Target date: {day}. {extra} Return json with key matches.\n\n"
+        f"Target date: {day}. {extra} Reply with json, key matches.\n\n"
         f"SEARCH NOTES:\n{search_text}"
     )
-    r = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "deepseek-flash",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {"type": "json_object"},
-            "max_tokens": 4096,
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"]
-    if not content:
-        raise RuntimeError("empty JSON from DeepSeek")
-    return json.loads(content)
+    last = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            r = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-flash",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 8192,
+                    "thinking": {"type": "disabled"},
+                },
+                timeout=60,
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+            if not content or not str(content).strip():
+                raise RuntimeError("empty JSON from DeepSeek")
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("JSON is not an object")
+            return parsed
+        except Exception as e:
+            last = e
+            print(f"json {kind} {day} attempt {attempt}/{RETRY_ATTEMPTS}: {e}")
+            if attempt < RETRY_ATTEMPTS:
+                sleep(2 * attempt)
+    raise last
 
 
 def _clean(value):
