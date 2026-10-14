@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import requests
@@ -28,6 +28,10 @@ TG_LIMIT = 4096
 
 def today_str():
     return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
+def yesterday_str():
+    return (datetime.now(TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def _content_blocks(payload):
@@ -72,20 +76,36 @@ def _flatten_search_text(payload):
     return "\n\n".join(lines).strip()
 
 
-def call_deepseek_search(day: str):
-    prompt = (
-        f"Search the web for men's football fixtures kicking off on {day} "
-        f"(Europe/Berlin calendar date, times in CET/CEST). "
-        "Include only: UEFA Champions League (UCL), UEFA Europa League (UEL), "
-        "UEFA Europa Conference League (UECL) including league phase, knockouts "
-        "and qualifying; UEFA Nations League (UNL); UEFA European Championship "
-        "qualifiers (EUROQ); UEFA World Cup qualifiers only, not other confederations (WCQ). "
-        "For each match report: competition, stage, whether it is first or second "
-        "leg of a two-legged tie (or not two-legged), kickoff CET, home team, away team, "
-        "home and away countries, and previous/first-leg score if this is a second leg. "
-        "Prefer official UEFA, FIFA, and major sports-wire sources. "
-        "If there are no such matches, say so explicitly."
-    )
+def call_deepseek_search(day: str, kind: str):
+    if kind == "results":
+        prompt = (
+            f"Search the web for men's football FULL-TIME SCORES from matches that "
+            f"kicked off on {day} (Europe/Berlin calendar date). "
+            "Include only: UEFA Champions League (UCL), UEFA Europa League (UEL), "
+            "UEFA Europa Conference League (UECL) including league phase, knockouts "
+            "and qualifying; UEFA Nations League (UNL); UEFA European Championship "
+            "qualifiers (EUROQ); UEFA World Cup qualifiers only, not other confederations (WCQ). "
+            "For each match report: competition, stage, whether it is first or second "
+            "leg of a two-legged tie (or not two-legged), kickoff CET, home team, away team, "
+            "home and away countries, previous/first-leg score if this is a second leg, "
+            "and the full-time score (home-away). "
+            "Prefer official UEFA, FIFA, and major sports-wire sources. "
+            "If there are no such matches, say so explicitly."
+        )
+    else:
+        prompt = (
+            f"Search the web for men's football fixtures kicking off on {day} "
+            f"(Europe/Berlin calendar date, times in CET/CEST). "
+            "Include only: UEFA Champions League (UCL), UEFA Europa League (UEL), "
+            "UEFA Europa Conference League (UECL) including league phase, knockouts "
+            "and qualifying; UEFA Nations League (UNL); UEFA European Championship "
+            "qualifiers (EUROQ); UEFA World Cup qualifiers only, not other confederations (WCQ). "
+            "For each match report: competition, stage, whether it is first or second "
+            "leg of a two-legged tie (or not two-legged), kickoff CET, home team, away team, "
+            "home and away countries, and previous/first-leg score if this is a second leg. "
+            "Prefer official UEFA, FIFA, and major sports-wire sources. "
+            "If there are no such matches, say so explicitly."
+        )
     r = requests.post(
         "https://api.deepseek.com/anthropic/v1/messages",
         headers={
@@ -124,8 +144,8 @@ def call_deepseek_search(day: str):
     return text
 
 
-def call_deepseek_json(day: str, search_text: str):
-    system_prompt = """Extract today's football matches into json.
+def call_deepseek_json(day: str, search_text: str, kind: str):
+    system_prompt = """Extract football matches into json.
 Use only facts from the provided search notes. Do not invent matches.
 Ignore women's matches and any competition not in the list.
 If a field is unknown, use an empty string.
@@ -143,7 +163,8 @@ EXAMPLE JSON OUTPUT:
       "away": "Arsenal",
       "home_country": "UA",
       "away_country": "GB",
-      "previous_score": "Shakhtar 1-0 Brugge"
+      "previous_score": "Shakhtar 1-0 Brugge",
+      "score": "2-1"
     }
   ]
 }
@@ -152,10 +173,15 @@ competition must be one of: UCL, UEL, UECL, UNL, EUROQ, WCQ.
 leg is "1", "2", or "".
 kickoff_cet is HH:MM 24-hour CET/CEST.
 previous_score is empty unless this is a second leg; then include first-leg home and away names and the score.
+score is the full-time result as home-away (e.g. "2-1"). Empty for fixtures that have not been played.
 date is YYYY-MM-DD of kickoff in Europe/Berlin.
 """
+    if kind == "results":
+        extra = "This is a RESULTS extract. Fill score with the full-time score."
+    else:
+        extra = "This is a FIXTURES extract. Leave score empty."
     user_prompt = (
-        f"Target date: {day}. Return json with key matches.\n\n"
+        f"Target date: {day}. {extra} Return json with key matches.\n\n"
         f"SEARCH NOTES:\n{search_text}"
     )
     r = requests.post(
@@ -223,6 +249,7 @@ def parse_matches(raw, day: str):
             "home_country": _clean(item.get("home_country")).upper(),
             "away_country": _clean(item.get("away_country")).upper(),
             "previous_score": _clean(item.get("previous_score")),
+            "score": _clean(item.get("score")),
         }
         key = (
             parsed["kickoff_cet"],
@@ -254,13 +281,22 @@ def format_match(match):
         f"{match['kickoff_cet']} CET | {match['competition']} | "
         f"{match['stage']} | {leg} | {prev}"
     )
-    teams = f"{match['home']} — {match['away']}"
+    if match.get("score"):
+        teams = f"{match['home']} {match['score']} {match['away']}"
+    else:
+        teams = f"{match['home']} — {match['away']}"
     return f"{meta}\n{teams}"
 
 
-def format_digest(matches, day: str):
+def format_digest(matches, day: str, kind: str):
+    if kind == "results":
+        empty = f"No matches yesterday ({day})."
+        title = f"Results ({day})"
+    else:
+        empty = f"No matches today ({day})."
+        title = f"Today ({day})"
     if not matches:
-        return f"No matches today ({day})."
+        return empty
     priority = [m for m in matches if is_priority(m)]
     other = [m for m in matches if not is_priority(m)]
     parts = []
@@ -268,7 +304,7 @@ def format_digest(matches, day: str):
         parts.append("Ukraine / Serbia\n\n" + "\n\n".join(format_match(m) for m in priority))
     if other:
         parts.append("Other\n\n" + "\n\n".join(format_match(m) for m in other))
-    return "\n\n".join(parts)
+    return title + "\n\n" + "\n\n".join(parts)
 
 
 def split_telegram(text):
@@ -300,32 +336,41 @@ async def send_chat(app, text: str):
         await app.bot.send_message(chat_id=int(CHAT_ID), text=chunk)
 
 
-def build_digest(day: str):
-    search_text = call_deepseek_search(day)
-    raw = call_deepseek_json(day, search_text)
+def build_digest(day: str, kind: str):
+    search_text = call_deepseek_search(day, kind)
+    raw = call_deepseek_json(day, search_text, kind)
     matches = parse_matches(raw, day)
-    return format_digest(matches, day)
+    if kind == "fixtures":
+        for m in matches:
+            m["score"] = ""
+    return format_digest(matches, day, kind)
 
 
-async def process_day(app, day: str):
+async def send_digest(app, day: str, kind: str):
     try:
-        text = build_digest(day)
+        text = build_digest(day, kind)
     except Exception as e:
         print(e)
+        label = "yesterday results" if kind == "results" else "today fixtures"
         msg = str(e)
         if "search returned nothing" in msg:
-            text = "Search returned nothing. Use /matches to retry."
+            text = f"Search returned nothing for {label}. Use /matches to retry."
         else:
-            text = "Failed to build match digest. Use /matches to retry."
+            text = f"Failed to build {label}. Use /matches to retry."
     await send_chat(app, text)
 
 
+async def process_day(app):
+    await send_digest(app, yesterday_str(), "results")
+    await send_digest(app, today_str(), "fixtures")
+
+
 async def matches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await process_day(context.application, today_str())
+    await process_day(context.application)
 
 
 async def daily_job(app):
-    await process_day(app, today_str())
+    await process_day(app)
 
 
 def setup_scheduler(app):
