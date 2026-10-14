@@ -1,0 +1,48 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      push_ups: ${{ steps.filter.outputs.push_ups }}
+      football: ${{ steps.filter.outputs.football }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            push_ups:
+              - "push-ups-bot/**"
+              - "docker-compose.yml"
+            football:
+              - "football-matches-bot/**"
+              - "docker-compose.yml"
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.push_ups == 'true' || needs.changes.outputs.football == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: rebuild changed bots
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 165.245.255.110
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/tg_bots
+            git pull --ff-only
+            SERVICES=""
+            if [ "${{ needs.changes.outputs.push_ups }}" = "true" ]; then
+              SERVICES="$SERVICES push-ups-bot"
+            fi
+            if [ "${{ needs.changes.outputs.football }}" = "true" ]; then
+              SERVICES="$SERVICES football-matches-bot"
+            fi
+            docker compose up -d --no-deps --build $SERVICES

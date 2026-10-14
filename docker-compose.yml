@@ -1,0 +1,11 @@
+services:
+  push-ups-bot:
+    build: ./push-ups-bot
+    env_file: ./push-ups-bot/.env
+    volumes:
+      - ./push-ups-bot/data:/app/data
+    restart: unless-stopped
+  football-matches-bot:
+    build: ./football-matches-bot
+    env_file: ./football-matches-bot/.env
+    restart: unless-stopped

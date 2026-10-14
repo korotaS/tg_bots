@@ -23,7 +23,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CHAT_ID = os.getenv("CHAT_ID")
-DATA_FILE = "data.json"
+DATA_FILE = Path(__file__).resolve().parent / "data" / "data.json"
 TZ = timezone("Europe/Moscow")
 
 DEFAULT_THRESHOLD = 125
@@ -55,6 +55,7 @@ def get_users():
 
 
 def save_all():
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(DATA_FILE, "w") as f:
         json.dump({"data": data, "config": config}, f)
 
