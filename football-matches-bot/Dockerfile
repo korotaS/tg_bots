@@ -5,4 +5,5 @@ COPY pyproject.toml .
 RUN uv sync --no-dev --no-install-project
 COPY bot.py .
 ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
 CMD ["python", "bot.py"]
