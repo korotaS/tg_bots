@@ -1,0 +1,13 @@
+[project]
+name = "football-matches-bot"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv",
+    "python-telegram-bot[job-queue]",
+    "pytz",
+    "requests",
+]
+
+[tool.uv]
+package = false
